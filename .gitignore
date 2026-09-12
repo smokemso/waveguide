@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+env/
+venv/
+*.tar.gz
+pinto/
+pinto_demo/
+PINTO_model_zoo/
+*.tflite
+*.onnx
+033_Hand_Detection_and_Tracking/
