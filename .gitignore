@@ -10,3 +10,9 @@ PINTO_model_zoo/
 *.tflite
 *.onnx
 033_Hand_Detection_and_Tracking/
+
+# Database files
+*.db
+
+# Scratch files
+scratch_*.py

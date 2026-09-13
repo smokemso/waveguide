@@ -24,9 +24,9 @@ from tracker  import build_hands, process_frame, frame_to_gpu_rgb, get_backend_i
 from gestures import GestureState, process_gestures
 from hud      import draw_landmarks, draw_hud
 
-ENABLE_BENCHMARK = False
+ENABLE_BENCHMARK = True
 BENCHMARK_FRAMES = 300  # Only used if ENABLE_BENCHMARK is True
-SHOW_DEBUG_WINDOW = False
+SHOW_DEBUG_WINDOW = True
 
 
 def compute_stats(values):
@@ -141,14 +141,17 @@ def main():
     backend_info = get_backend_info()
 
     device_str = backend_info.get("mediapipe_backend", "Unknown")
-    logger = MetricsLogger(device=device_str, db_path="metrics_production.db")
+    logger = MetricsLogger(device=device_str, db_path="metrics_debug.db")
 
-    print("[INFO] Running in production mode. Metrics are being logged to SQLite in the background. Press 'q' to quit.")
+    if ENABLE_BENCHMARK:
+        print(f"[BENCHMARK] Starting {BENCHMARK_FRAMES}-frame benchmark harness (logging to SQLite)...")
+    else:
+        print("[INFO] Benchmark is OFF. Running normally. Press 'q' to quit.")
         
     frame_count = 0
 
     while True:
-        # Start wall-clock timing for the entire loop iteration
+        # Start wall-clock timing for the entire frame
         t_frame_start = time.perf_counter()
 
         # ── Stage 1a: Camera Read (OpenCV) ────────────────────
@@ -160,15 +163,17 @@ def main():
             continue  # skip if frame wasnt ready
 
         if not is_new:
-            # Stale frame: skip inference and cursor logic to prevent jitter, 
-            # just sleep to maintain 30fps loop cadence and try again.
+            # maintain pacing
             elapsed = time.perf_counter() - t_frame_start
             if elapsed < (1.0 / 30.0):
                 time.sleep((1.0 / 30.0) - elapsed)
             
             # Log stale frame
-            frame_count += 1
-            logger.log(frame_count, opencv_ms=t_cam_ms, math_ms=0.0, total_ms=(time.perf_counter()-t_frame_start)*1000.0, is_new=False)
+            if ENABLE_BENCHMARK:
+                frame_count += 1
+                logger.log(frame_count, opencv_ms=t_cam_ms, math_ms=0.0, total_ms=(time.perf_counter()-t_frame_start)*1000.0, is_new=False)
+                if BENCHMARK_FRAMES is not None and frame_count >= BENCHMARK_FRAMES:
+                    break
             continue
 
         # ── Stage 1b: Flip and Color Conversion (OpenCV/GPU) ──
@@ -205,22 +210,23 @@ def main():
         # Total OpenCV Stage
         opencv_ms = t_cam_ms + t_conv_ms + t_draw_ms
 
-        frame_count += 1
-        logger.log(frame_count, opencv_ms, math_ms, total_ms, is_new=True)
+        if ENABLE_BENCHMARK:
+            frame_count += 1
+            logger.log(frame_count, opencv_ms, math_ms, total_ms, is_new=True)
+
+            if BENCHMARK_FRAMES is not None and frame_count >= BENCHMARK_FRAMES:
+                break
 
         if key == ord('q'):
             print("\n[INFO] Stopped early by user ('q' pressed).")
             break
-            
-        # ── Pacing (Frame-rate cap) ───────────────────────────
-        # Ensure we don't spin faster than 30fps (~33.33ms per loop)
-        elapsed = time.perf_counter() - t_frame_start
-        if elapsed < (1.0 / 30.0):
-            time.sleep((1.0 / 30.0) - elapsed)
 
     stream.stop()
     cv2.destroyAllWindows()
     logger.close()
+
+    if ENABLE_BENCHMARK:
+        logger.summarize()
 
 if __name__ == "__main__":
     main()

@@ -3,7 +3,7 @@
 
 # cursor stuff
 SENSITIVITY    = 40    # higher = moves faster
-SMOOTHENING    = 14    # higher = less shaky
+SMOOTHENING    = 25    # higher = less shaky
 DEADZONE       = 12    # ignores tiny movements (hand tremor fix)
 
 # clicking and scrolling
@@ -16,3 +16,6 @@ CLICK_COOLDOWN  = 0.4  # gap between clicks so it doesnt spam
 CAM_WIDTH  = 640
 CAM_HEIGHT = 480
 CAM_FPS    = 30
+
+# system tuning
+HOMELAB_MODE   = False  # Caps CPU threads to leave headroom for other services

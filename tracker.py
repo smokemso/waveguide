@@ -1,25 +1,23 @@
-# ========================= tracker.py ========================
-# Hand landmark detection via MediaPipe.
-# Tries GPU delegate first, falls back to CPU automatically.
-# =============================================================
-
 import cv2
 import time
 import math
 import numpy as np
-import onnxruntime as ort
 import os
+import psutil
+
+from openvino import Core
+
+from config import HOMELAB_MODE
 
 # ── Intel GPU via OpenCL (OpenCV frame ops) ───────────────────
 ocl_available = cv2.ocl.haveOpenCL()
 cv2.ocl.setUseOpenCL(ocl_available)
 print(f"[GPU] OpenCV OpenCL   : {'ENABLED  v' if ocl_available else 'NOT available, falling back to CPU'}")
 
+_core = None
+_palm_compiled = None
+_lm_compiled = None
 _ep_active = "Unknown"
-_palm_session = None
-_landmark_session = None
-_palm_input_name = ""
-_lm_input_name = ""
 _palm_shape = (192, 192)
 _lm_shape = (224, 224)
 
@@ -30,52 +28,67 @@ def get_backend_info():
         "opencl_enabled": ocl_available,
         "opencl_device": dev_name,
         "mediapipe_gpu_attempted": True,
-        "mediapipe_backend": f"ONNX Runtime ({_ep_active})",
+        "mediapipe_backend": f"OpenVINO Native ({_ep_active})",
     }
 
-
 def build_hands():
-    """Create InferenceSessions ONCE at startup."""
-    global _palm_session, _landmark_session, _ep_active, _palm_input_name, _lm_input_name
-    print("[GPU] Initializing ONNX Runtime Sessions...")
+    """Create OpenVINO Compiled Models ONCE at startup dynamically."""
+    global _core, _palm_compiled, _lm_compiled, _ep_active
     
-    # --- Thread Tuning for CPUExecutionProvider ---
-    options = ort.SessionOptions()
-    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    physical_cores = psutil.cpu_count(logical=False) or (os.cpu_count() or 4)
+    logical_cores = psutil.cpu_count(logical=True) or (os.cpu_count() or 4)
+    print(f"[HW] CPU: {physical_cores} physical cores, {logical_cores} logical")
     
-    # Heuristic for physical cores (assuming hyperthreading)
-    logical_cores = os.cpu_count() or 4
-    physical_cores = logical_cores // 2 if logical_cores > 2 else logical_cores
-    
-    options.intra_op_num_threads = physical_cores
-    options.inter_op_num_threads = 1
-    
-    print(f"[GPU] ONNX Threading  : intra={options.intra_op_num_threads}, inter={options.inter_op_num_threads}")
+    if HOMELAB_MODE:
+        num_threads = max(2, physical_cores // 2)
+        print(f"[HW] Shared-system mode: capping to {num_threads} threads to preserve headroom for other workloads, preferring GPU offload where available.")
+    else:
+        num_threads = physical_cores
+        print(f"[HW] Dedicated mode: using {num_threads} threads for CPU inference. GPU opportunistic.")
 
-    providers = ["CPUExecutionProvider"]
-    provider_options = [{}]
-
-    def load_model(path):
-        try:
-            sess = ort.InferenceSession(path, options, providers=providers)
-        except Exception as e:
-            print(f"[GPU] Error loading {os.path.basename(path)}: {e}.")
-            sess = None
-        return sess
-
-    # Using the 'lite' models as MediaPipe actually uses by default
+    _core = Core()
+    available = _core.available_devices
+    print(f"[HW] Devices available to OpenVINO: {available}")
+    
     base_path = r"C:\Users\shrad\OneDrive\Desktop\c.c\gesture_project_clean\033_Hand_Detection_and_Tracking\30_batchN_post-process_marged"
-    palm_model = os.path.join(base_path, "palm_detection_lite_inf_post_192x192.onnx")
-    lm_model = os.path.join(base_path, "hand_landmark_lite_1x3x224x224.onnx")
+    palm_model_path = os.path.join(base_path, "palm_detection_lite_inf_post_192x192.onnx")
+    lm_model_path = os.path.join(base_path, "hand_landmark_lite_1x3x224x224.onnx")
 
-    _palm_session = load_model(palm_model)
-    _landmark_session = load_model(lm_model)
-    
-    _ep_active = _palm_session.get_providers()[0]
-    print(f"[GPU] ONNX Runtime AI   : {_ep_active} ENABLED  v")
-    
-    _palm_input_name = _palm_session.get_inputs()[0].name
-    _lm_input_name = _landmark_session.get_inputs()[0].name
+    palm_model = _core.read_model(palm_model_path)
+    lm_model = _core.read_model(lm_model_path)
+
+    gpu_success = False
+    target_device = "CPU"
+
+    # Opportunistically try GPU if present
+    if any(d.startswith("GPU") for d in available):
+        try:
+            palm_gpu = _core.compile_model(palm_model, device_name="GPU")
+            lm_gpu = _core.compile_model(lm_model, device_name="GPU")
+            
+            # Run one dummy inference to confirm it actually executes without throwing
+            dummy_input = np.zeros((1, 3, 192, 192), dtype=np.float32)
+            _ = palm_gpu([dummy_input])
+            
+            _palm_compiled, _lm_compiled = palm_gpu, lm_gpu
+            target_device = "GPU"
+            gpu_success = True
+            print("[HW] GPU available and verified working - using GPU")
+        except Exception as e:
+            print(f"[HW] GPU detected but failed verification ({e}) - falling back to CPU")
+
+    if not gpu_success:
+        print(f"[HW] Compiling CPU fallback models (Threads: {num_threads})...")
+        t_compile_start = time.perf_counter()
+        ov_config = {"INFERENCE_NUM_THREADS": num_threads}
+        _palm_compiled = _core.compile_model(palm_model, device_name="CPU", config=ov_config)
+        _lm_compiled = _core.compile_model(lm_model, device_name="CPU", config=ov_config)
+        t_compile_ms = (time.perf_counter() - t_compile_start) * 1000.0
+        print(f"[HW] CPU Fallback JIT Compile Time: {t_compile_ms:.2f} ms")
+        target_device = "CPU"
+
+    print(f"[HW] Selected inference device: {target_device}")
+    _ep_active = target_device
 
     class DummyHands:
         def process(self, rgb_frame):
@@ -108,8 +121,8 @@ def process_frame(hands, rgb_frame, return_timing=False):
     
     # === 2. Palm Detection Inference ===
     # Output: [N, 8] -> [pd_score, box_x, box_y, box_size, kp0_x, kp0_y, kp2_x, kp2_y]
-    palm_out = _palm_session.run(None, {_palm_input_name: palm_tensor})
-    boxes = palm_out[0]
+    palm_out = _palm_compiled([palm_tensor])
+    boxes = list(palm_out.values())[0]
     
     # === 3. NMS / Post-process ===
     keep = boxes[:, 0] > 0.6
@@ -152,17 +165,18 @@ def process_frame(hands, rgb_frame, return_timing=False):
     lm_tensor = np.transpose(resized_lm, (2, 0, 1))
     lm_tensor = np.expand_dims(lm_tensor.astype(np.float32) / 255.0, axis=0)
     
-    lm_out = _landmark_session.run(None, {_lm_input_name: lm_tensor})
+    lm_out_dict = _lm_compiled([lm_tensor])
+    lm_out_vals = list(lm_out_dict.values())
     
     # === 6. Confidence Gating & Landmark extraction ===
-    confidence = float(lm_out[1][0][0])
-    print(f"[DEBUG] Hand Confidence Score: {confidence:.3f}")
+    # OpenVINO dictionary order: index 0 is (1, 63) landmarks, index 1 is (1, 1) confidence
+    confidence = float(lm_out_vals[1][0][0])
     
     if confidence < 0.5:
         if return_timing: return None, (time.perf_counter() - t0) * 1000.0
         return None
 
-    landmarks_flat = lm_out[0][0]
+    landmarks_flat = lm_out_vals[0][0]
     
     scale = 224.0 / crop_size
     M_224 = M.copy()
