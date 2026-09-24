@@ -50,13 +50,11 @@ def build_hands():
     available = _core.available_devices
     print(f"[HW] Devices available to OpenVINO: {available}")
     
-    base_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "033_Hand_Detection_and_Tracking",
-        "30_batchN_post-process_marged"
-    )
-    palm_model_path = os.path.join(base_path, "palm_detection_lite_inf_post_192x192.onnx")
-    lm_model_path = os.path.join(base_path, "hand_landmark_lite_1x3x224x224.onnx")
+    import pathlib
+    PROJECT_ROOT = pathlib.Path(__file__).resolve().parent
+    base_path = PROJECT_ROOT / "033_Hand_Detection_and_Tracking" / "30_batchN_post-process_marged"
+    palm_model_path = base_path / "palm_detection_lite_inf_post_192x192.onnx"
+    lm_model_path = base_path / "hand_landmark_lite_1x3x224x224.onnx"
 
     palm_model = _core.read_model(palm_model_path)
     lm_model = _core.read_model(lm_model_path)
